@@ -3,31 +3,208 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>税务稽查案件与复议流程</title>
+  <title>税务稽查案件与税收保全</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
-    main { max-width: 960px; margin: auto; }
-    button { padding: .55rem .9rem; cursor: pointer; }
+    main { max-width: 1080px; margin: auto; }
+    section { border: 1px solid #dde3ea; border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+    h2 { margin-top: 0; font-size: 1.05rem; }
+    button { padding: .45rem .8rem; cursor: pointer; }
+    input, select { padding: .4rem; }
+    label { display: inline-flex; flex-direction: column; gap: .2rem; font-size: .85rem; color: #445; margin: .25rem .75rem .25rem 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: .5rem; }
+    th, td { border: 1px solid #dde3ea; padding: .4rem .55rem; text-align: left; font-size: .9rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: .75rem; align-items: flex-end; flex-wrap: wrap; }
+    .muted { color: #667; font-size: .9rem; }
+    .todo { background: #fff7e6; border: 1px solid #ffd591; border-radius: 6px; padding: .4rem .6rem; margin: .4rem 0; font-size: .9rem; }
   </style>
 </head>
 <body>
 <main>
-  <h1>税务稽查案件与复议流程</h1>
-  <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
-  <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
-  <pre id="output">点击上方按钮读取服务状态。</pre>
+  <h1>税务稽查案件与税收保全</h1>
+
+  <section>
+    <h2>案件</h2>
+    <div class="row">
+      <label>案件ID <input id="record-id" type="number" min="1" style="width:7rem"></label>
+      <button id="load-case">加载案件</button>
+      <button id="create-case">创建演示案件</button>
+    </div>
+    <p id="case-view" class="muted">尚未加载案件。</p>
+    <div id="todo-view"></div>
+  </section>
+
+  <section>
+    <h2>提出税收保全（调查人员）</h2>
+    <div class="row">
+      <label>财产类型
+        <select id="asset-type">
+          <option value="bank_account">银行账户</option>
+          <option value="real_estate">不动产权证</option>
+          <option value="vehicle">车辆车架号</option>
+        </select>
+      </label>
+      <label>财产标识 <input id="asset-key" placeholder="账号 / 证号 / 车架号"></label>
+      <label>保全金额 <input id="amount" type="number" min="0.01" step="0.01" value="100000"></label>
+      <label>期限（天） <input id="duration" type="number" min="1" max="180" value="30" style="width:6rem"></label>
+      <label>理由 <input id="reason" value="发现转移财产迹象"></label>
+      <button id="propose">提出保全</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>保全列表（复核 / 续保 / 解除 / 转为扣划）</h2>
+    <div id="preservation-list" class="muted">加载案件后显示。</div>
+  </section>
+
+  <section>
+    <h2>输出</h2>
+    <pre id="output">操作结果会显示在这里。</pre>
+  </section>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
-  const data = await response.json();
-  document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+const INSPECTOR = {"X-User-Id": "demo-inspector", "X-Role": "inspector", "X-Org": "demo"};
+const REVIEWER = {"X-User-Id": "demo-reviewer", "X-Role": "reviewer", "X-Org": "demo"};
+const ASSET_LABELS = {bank_account: "银行账户", real_estate: "不动产权证", vehicle: "车辆车架号"};
+const STATUS_LABELS = {pending: "待复核", active: "保全中", rejected: "已驳回", released: "已解除", seized: "已扣划"};
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+function show(data) {
+  document.getElementById("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
 }
-document.getElementById("load").onclick = () => show("/api/records?limit=20");
-document.getElementById("stats").onclick = () => show("/api/stats");
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    show(data);
+    throw new Error(data.message || ("HTTP " + response.status));
+  }
+  return data;
+}
+
+function currentRecordId() {
+  return parseInt(document.getElementById("record-id").value, 10);
+}
+
+async function createCase() {
+  const data = await api("/api/records", {
+    method: "POST",
+    headers: Object.assign({"Content-Type": "application/json"}, INSPECTOR),
+    body: JSON.stringify({
+      reference: "DEMO-" + Date.now(),
+      data: {taxpayer: "演示纳税人", tax_period: "2026-Q3", declared_tax: 500000, assessed_tax: 760000, penalty_rate: 0.2, evidence_count: 4, days_late: 90, appeal_deadline_day: 60}
+    })
+  });
+  document.getElementById("record-id").value = data.id;
+  show(data);
+  await refresh();
+}
+
+async function refresh() {
+  const id = currentRecordId();
+  if (!id) { show("请先输入案件ID或创建演示案件"); return; }
+  const record = await api("/api/records/" + id, {headers: INSPECTOR});
+  const pres = await api("/api/records/" + id + "/preservations", {headers: INSPECTOR});
+  renderCase(record);
+  renderList(pres.items);
+}
+
+function renderCase(record) {
+  const p = record.preservation;
+  document.getElementById("case-view").innerHTML =
+    "纳税人：" + esc(record.payload.taxpayer) + "　状态：" + esc(record.state) +
+    "　欠缴总额：" + p.total_due + "　<strong>当前占用额度：" + p.occupied_amount + "</strong>" +
+    "　待复核金额：" + p.pending_amount + "　已到期未解除：" + p.expired_amount + "　可再保全：" + p.available_amount;
+  document.getElementById("todo-view").innerHTML = p.todos.map((t) =>
+    '<div class="todo">待办：' + esc(t.label) + "（保全#" + t.preservation_id + "，" + esc(t.asset_key) + "，金额 " + t.amount + "）</div>"
+  ).join("");
+}
+
+function renderList(items) {
+  const host = document.getElementById("preservation-list");
+  if (!items.length) { host.textContent = "暂无保全记录。"; return; }
+  const rows = items.map((item) => {
+    let actions = "";
+    if (item.status === "pending") {
+      actions = '<button onclick="reviewPres(' + item.id + ',true)">复核通过</button> ' +
+                '<button onclick="reviewPres(' + item.id + ',false)">驳回</button>';
+    } else if (item.status === "active") {
+      actions = '<button onclick="renewPres(' + item.id + ')">续保</button> ' +
+                '<button onclick="releasePres(' + item.id + ')">解除</button> ' +
+                '<button onclick="seizePres(' + item.id + ')">转为扣划</button>';
+    }
+    return "<tr><td>" + item.id + "</td><td>" + esc(ASSET_LABELS[item.asset_type] || item.asset_type) + "</td><td>" + esc(item.asset_key) +
+           "</td><td>" + item.amount + "</td><td>" + esc(STATUS_LABELS[item.status] || item.status) + "</td><td>" +
+           esc(item.expires_at || "-") + "</td><td>" + actions + "</td></tr>";
+  }).join("");
+  host.innerHTML = "<table><tr><th>ID</th><th>类型</th><th>标识</th><th>金额</th><th>状态</th><th>到期时间</th><th>操作</th></tr>" + rows + "</table>";
+}
+
+async function run(action) {
+  try { await action(); } catch (err) { /* 错误已展示 */ }
+}
+
+async function propose() {
+  const id = currentRecordId();
+  if (!id) { show("请先加载案件"); return; }
+  await run(async () => {
+    const data = await api("/api/records/" + id + "/preservations", {
+      method: "POST",
+      headers: Object.assign({"Content-Type": "application/json"}, INSPECTOR),
+      body: JSON.stringify({
+        asset_type: document.getElementById("asset-type").value,
+        asset_key: document.getElementById("asset-key").value,
+        amount: parseFloat(document.getElementById("amount").value),
+        duration_days: parseInt(document.getElementById("duration").value, 10),
+        reason: document.getElementById("reason").value
+      })
+    });
+    show(data);
+    await refresh();
+  });
+}
+
+async function presAction(id, action, headers, body) {
+  await run(async () => {
+    const data = await api("/api/preservations/" + id + "/actions/" + action, {
+      method: "POST",
+      headers: Object.assign({"Content-Type": "application/json"}, headers),
+      body: JSON.stringify(body)
+    });
+    show(data);
+    await refresh();
+  });
+}
+
+async function reviewPres(id, approve) {
+  const note = approve ? "同意保全" : prompt("请输入驳回意见", "证据不足");
+  if (note === null) return;
+  await presAction(id, "review", REVIEWER, {approve: approve, note: note});
+}
+
+async function renewPres(id) {
+  const days = prompt("续保天数（1-180）", "30");
+  if (days === null) return;
+  await presAction(id, "renew", INSPECTOR, {extend_days: parseInt(days, 10), reason: "案件尚未办结"});
+}
+
+async function releasePres(id) {
+  const reason = prompt("解除原因", "欠税已缴清");
+  if (reason === null) return;
+  await presAction(id, "release", REVIEWER, {reason: reason});
+}
+
+async function seizePres(id) {
+  const note = prompt("扣划说明", "划拨入库抵缴欠税");
+  if (note === null) return;
+  await presAction(id, "seize", REVIEWER, {note: note});
+}
+
+document.getElementById("load-case").onclick = () => run(refresh);
+document.getElementById("create-case").onclick = () => run(createCase);
+document.getElementById("propose").onclick = propose;
 </script>
 </body>
 </html>
