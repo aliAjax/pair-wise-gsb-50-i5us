@@ -1,7 +1,9 @@
 """税务稽查案件与复议流程领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+import re
+from datetime import date, timedelta
+from typing import Any, Callable, Dict, Iterable, Tuple
 
-from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, optional_text, text, text_list
 
 
 INITIAL_STATE = "opened"
@@ -9,9 +11,28 @@ CREATE_ROLES = {'inspector'}
 ACTION_ROLES = {'investigate': {'inspector'}, 'propose': {'inspector'}, 'review': {'reviewer'}, 'appeal': {'taxpayer_rep'}, 'close': {'reviewer'}}
 TRANSITIONS = {'investigate': {'opened': 'investigating'}, 'propose': {'investigating': 'proposed'}, 'review': {'proposed': 'reviewed'}, 'appeal': {'reviewed': 'appealed'}, 'close': {'reviewed': 'closed', 'appealed': 'closed'}}
 
+# 税收保全：标的类型、操作权限与状态
+PRESERVATION_TARGET_TYPES = ["bank_account", "real_estate", "vehicle"]
+PRESERVATION_TARGET_LABELS = {"bank_account": "银行账户", "real_estate": "不动产", "vehicle": "车辆"}
+PRESERVATION_ACTIONS = ["review", "renew", "release", "convert"]
+PRESERVATION_ACTION_ROLES = {'propose': {'inspector'}, 'review': {'reviewer'}, 'renew': {'inspector'}, 'release': {'inspector', 'reviewer'}, 'convert': {'reviewer'}}
+PRESERVATION_REVIEW_OUTCOMES = ["approved", "rejected"]
+PRESERVATION_LIVE_STATUSES = ("pending", "active")
+TARGET_KEY_PATTERNS = {
+    "bank_account": (re.compile(r"^\d{8,32}$"), "银行账户应为8-32位数字"),
+    "real_estate": (re.compile(r"^[0-9A-Za-z一-鿿（）()\-]{4,64}$"), "不动产权证号格式不正确"),
+    "vehicle": (re.compile(r"^[A-HJ-NPR-Z0-9]{17}$"), "车辆车架号应为17位字母数字(不含I/O/Q)"),
+}
+
 
 class DomainRules:
     INITIAL_STATE = INITIAL_STATE
+
+    def __init__(self, clock: Callable[[], date] = None) -> None:
+        self._clock = clock or date.today
+
+    def today(self) -> date:
+        return self._clock()
 
     def known_role(self, role: str) -> bool:
         all_roles = set(CREATE_ROLES)
@@ -94,3 +115,62 @@ class DomainRules:
             summary = "案件已结案"
         p.update(changes)
         return new_state, p, summary or ("已执行%s" % action)
+
+    # ---- 税收保全 ----
+
+    def role_can_preservation_action(self, role: str, action: str) -> bool:
+        return role == "admin" or role in PRESERVATION_ACTION_ROLES.get(action, set())
+
+    def target_type_label(self, target_type: str) -> str:
+        return PRESERVATION_TARGET_LABELS.get(target_type, target_type)
+
+    def resolve_expiry(self, data: Dict[str, Any], base: date = None) -> str:
+        base = base or self.today()
+        raw = data.get("expires_on")
+        if raw is not None and str(raw).strip():
+            try:
+                expiry = date.fromisoformat(str(raw).strip())
+            except ValueError as exc:
+                raise ValidationError("expires_on必须是YYYY-MM-DD日期") from exc
+        elif data.get("duration_days") is not None:
+            expiry = base + timedelta(days=integer(data, "duration_days", 1, 3650))
+        else:
+            expiry = base + timedelta(days=30)
+        if expiry <= base:
+            raise ValidationError("保全到期日必须晚于今天")
+        return expiry.isoformat()
+
+    def validate_preservation_proposal(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        target_type = choice(data, "target_type", PRESERVATION_TARGET_TYPES)
+        target_key = text(data, "target_key")
+        if target_type == "vehicle":
+            target_key = target_key.upper()
+        pattern, message = TARGET_KEY_PATTERNS[target_type]
+        if not pattern.match(target_key):
+            raise ValidationError(message)
+        amount = number(data, "amount", 0)
+        if amount <= 0:
+            raise ValidationError("amount必须大于0")
+        return {
+            "target_type": target_type,
+            "target_key": target_key,
+            "amount": round(amount, 2),
+            "reason": text(data, "reason"),
+            "expires_on": self.resolve_expiry(data),
+        }
+
+    def validate_preservation_review(self, data: Dict[str, Any]) -> Tuple[str, str]:
+        return choice(data, "outcome", PRESERVATION_REVIEW_OUTCOMES), text(data, "note")
+
+    def validate_preservation_renewal(self, order: Dict[str, Any], data: Dict[str, Any]) -> Tuple[str, str]:
+        reason = text(data, "reason")
+        new_expiry = self.resolve_expiry(data)
+        if new_expiry <= str(order["expires_on"]):
+            raise ValidationError("续保后的到期日必须晚于当前到期日")
+        return new_expiry, reason
+
+    def validate_preservation_release(self, data: Dict[str, Any]) -> str:
+        return text(data, "reason")
+
+    def validate_preservation_convert(self, data: Dict[str, Any]) -> str:
+        return optional_text(data, "note")

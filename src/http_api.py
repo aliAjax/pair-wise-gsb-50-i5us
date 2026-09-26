@@ -12,6 +12,9 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+RECORD_PRESERVATIONS_RE = re.compile(r"^/api/records/(\d+)/preservations$")
+PRESERVATION_RE = re.compile(r"^/api/preservations/(\d+)$")
+PRESERVATION_ACTION_RE = re.compile(r"^/api/preservations/(\d+)/actions/([a-z_]+)$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -84,6 +87,14 @@ def make_handler(service: Any, static_dir: Path):
                 if match:
                     self._send(200, {"items": service.timeline(self._actor(), int(match.group(1)))})
                     return
+                match = RECORD_PRESERVATIONS_RE.match(parsed.path)
+                if match:
+                    self._send(200, {"items": service.list_preservations(self._actor(), int(match.group(1)))})
+                    return
+                match = PRESERVATION_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_preservation(self._actor(), int(match.group(1))))
+                    return
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
@@ -98,6 +109,16 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                match = RECORD_PRESERVATIONS_RE.match(parsed.path)
+                if match:
+                    order = service.propose_preservation(self._actor(), int(match.group(1)), body)
+                    self._send(201, order)
+                    return
+                match = PRESERVATION_ACTION_RE.match(parsed.path)
+                if match:
+                    order = service.act_preservation(self._actor(), int(match.group(1)), match.group(2), body.get("data", {}))
+                    self._send(200, order)
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:
